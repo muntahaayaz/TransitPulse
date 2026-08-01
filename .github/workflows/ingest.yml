@@ -1,0 +1,38 @@
+name: Ingest GTFS-RT Feed
+
+# Schedule chosen per ARCHITECTURE.md ADR-001: GitHub Actions cron is not
+# built for true continuous polling, so this triggers every 15 minutes and
+# the job itself polls in a loop for a bounded duration (RUN_DURATION_SECONDS
+# below), leaving margin before the next trigger to avoid overlapping runs.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}   # allows manual runs from the Actions tab, useful for M0 verification
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # Hard timeout as a safety net in case RUN_DURATION_SECONDS logic ever
+    # fails to exit the loop -- prevents a stuck job from silently consuming
+    # Actions minutes indefinitely.
+    timeout-minutes: 12
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ingestion cycle
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GTFS_FEED_URL: ${{ secrets.GTFS_FEED_URL }}
+          RUN_DURATION_SECONDS: "600"
+          POLL_INTERVAL_SECONDS: "30"
+        run: python src/ingestion/run_ingestion.py

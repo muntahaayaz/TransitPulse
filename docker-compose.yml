@@ -1,0 +1,24 @@
+# Local development only. Production database is Neon (see ARCHITECTURE.md
+# Section 4) -- this compose file exists so the schema and ingestion logic
+# can be developed and tested against a real Postgres instance without
+# requiring a Neon account first.
+#
+# Usage:
+#   docker compose up -d
+#   psql "postgresql://transitpulse:transitpulse@localhost:5432/transitpulse" -f src/db/schema.sql
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: transitpulse
+      POSTGRES_PASSWORD: transitpulse
+      POSTGRES_DB: transitpulse
+    ports:
+      - "5432:5432"
+    volumes:
+      - transitpulse_pgdata:/var/lib/postgresql/data
+
+volumes:
+  transitpulse_pgdata:
