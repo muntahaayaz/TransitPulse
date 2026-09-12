@@ -1,0 +1,895 @@
+"""
+TransitPulse Reliability Engine
+
+M1 - Real scheduled-vs-actual reliability metrics.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+
+
+NEW_YORK_TZ = ZoneInfo("America/New_York")
+
+ON_TIME_THRESHOLD_MINUTES = 5.0
+MAX_TRIP_START_DISTANCE_MINUTES = 20.0
+
+
+# ---------------------------------------------------------------------------
+# Service-date helpers
+# ---------------------------------------------------------------------------
+
+
+def _service_id_for_date(
+    conn,
+    service_date: date,
+    cache: dict[date, str | None] | None = None,
+) -> str | None:
+    """Resolve the applicable GTFS service_id for a service date."""
+
+    if cache is not None and service_date in cache:
+        return cache[service_date]
+
+    date_text = service_date.strftime("%Y%m%d")
+
+    query = """
+        SELECT service_id, exception_type
+        FROM gtfs_calendar_dates
+        WHERE date = %s::text
+        ORDER BY service_id;
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(query, (date_text,))
+        exceptions = cur.fetchall()
+
+    removed = set()
+    added = []
+
+    for service_id, exception_type in exceptions:
+        service_id = str(service_id)
+
+        if exception_type == 2:
+            removed.add(service_id)
+        elif exception_type == 1:
+            added.append(service_id)
+
+    if added:
+        result = added[0]
+
+        if cache is not None:
+            cache[service_date] = result
+
+        return result
+
+    weekday_column = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ][service_date.weekday()]
+
+    query = f"""
+        SELECT service_id
+        FROM gtfs_calendar
+        WHERE start_date <= %s::text
+          AND end_date >= %s::text
+          AND {weekday_column} = 1
+        ORDER BY service_id;
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(query, (date_text, date_text))
+        rows = cur.fetchall()
+
+    result = None
+
+    for (service_id,) in rows:
+        service_id = str(service_id)
+
+        if service_id not in removed:
+            result = service_id
+            break
+
+    if cache is not None:
+        cache[service_date] = result
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GTFS time helpers
+# ---------------------------------------------------------------------------
+
+
+def _parse_gtfs_time(value: str | None) -> time | None:
+    """
+    Parse a GTFS time string.
+
+    GTFS allows hours greater than 23, such as 24:15:00.
+    """
+
+    if not value:
+        return None
+
+    parts = value.split(":")
+
+    if len(parts) != 3:
+        return None
+
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+        second = int(float(parts[2]))
+    except ValueError:
+        return None
+
+    return time(
+        hour % 24,
+        minute,
+        second,
+    )
+
+
+def _gtfs_datetime(
+    service_date: date,
+    gtfs_time: str | None,
+) -> datetime | None:
+    """
+    Convert a GTFS service-day time into a timezone-aware
+    New York datetime.
+
+    Handles GTFS times greater than 24:00.
+    """
+
+    if not gtfs_time:
+        return None
+
+    parts = gtfs_time.split(":")
+
+    if len(parts) != 3:
+        return None
+
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+        second = int(float(parts[2]))
+    except ValueError:
+        return None
+
+    days, normalized_hour = divmod(hour, 24)
+
+    naive = datetime.combine(
+        service_date,
+        time(
+            normalized_hour,
+            minute,
+            second,
+        ),
+    )
+
+    return (
+        naive.replace(tzinfo=NEW_YORK_TZ)
+        + timedelta(days=days)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Realtime -> static GTFS resolver
+# ---------------------------------------------------------------------------
+
+
+def resolve_realtime_event(
+    conn,
+    route_id: str,
+    direction_id: str | None,
+    trip_start_date: str | None,
+    stop_id: str,
+    actual_time: datetime,
+    _service_id_cache: dict[date, str | None] | None = None,
+    _candidate_cache: dict[tuple, pd.DataFrame] | None = None,
+    _route_service_cache: dict[tuple[str, str], str | None] | None = None,
+):
+    """
+    Resolve one realtime stop event to a static GTFS trip.
+
+    Matching uses:
+        1. service date
+        2. route
+        3. direction when available
+        4. stop
+        5. nearest scheduled stop time
+
+    If trip_start_date is missing, the local New York date of the
+    realtime event is used.
+
+    If direction_id is missing, all static GTFS directions for the
+    route/service/stop are considered.
+
+    If the calendar service exists for the date but has no static
+    trips for this route, the resolver falls back to the route's
+    most-used static service_id.
+
+    A match is rejected when the nearest scheduled event is more
+    than MAX_TRIP_START_DISTANCE_MINUTES away.
+    """
+
+    if not route_id or not stop_id:
+        return None
+
+    if pd.isna(actual_time):
+        return None
+
+    # IMPORTANT:
+    # The realtime feed stores these timestamps with a timezone label,
+    # but the clock value itself represents New York local time.
+    #
+    # Therefore we must preserve the clock value and attach the
+    # New York timezone instead of converting the clock value.
+    actual_local = actual_time.replace(
+        tzinfo=NEW_YORK_TZ
+    )
+
+    if trip_start_date:
+        try:
+            service_date = datetime.strptime(
+                str(trip_start_date),
+                "%Y%m%d",
+            ).date()
+        except ValueError:
+            service_date = actual_local.date()
+    else:
+        service_date = actual_local.date()
+
+    # First resolve the calendar service for the date.
+    service_id = _service_id_for_date(
+        conn,
+        service_date,
+        cache=_service_id_cache,
+    )
+
+    route_service_key = (str(route_id), str(service_id) if service_id else "")
+
+    if _route_service_cache is not None and route_service_key in _route_service_cache:
+        service_id = _route_service_cache[route_service_key]
+
+    # IMPORTANT:
+    # A service can be active on this date globally while the route
+    # has no trips assigned to that service. This happens with 7X:
+    # Sunday has a calendar service, but 7X static trips are Weekday.
+    #
+    # Therefore, verify that the resolved service actually exists
+    # for this route before using it.
+    if service_id:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM gtfs_trips
+                WHERE route_id = %s
+                  AND service_id = %s
+                LIMIT 1;
+                """,
+                (
+                    route_id,
+                    service_id,
+                ),
+            )
+
+            route_service_exists = (
+                cur.fetchone() is not None
+            )
+
+        if not route_service_exists:
+            service_id = None
+
+    # If the calendar service does not apply to this route,
+    # fall back to the route's most-used static service.
+    if not service_id:
+        fallback_query = """
+            SELECT service_id
+            FROM gtfs_trips
+            WHERE route_id = %s
+            GROUP BY service_id
+            ORDER BY COUNT(*) DESC, service_id
+            LIMIT 1;
+        """
+
+        with conn.cursor() as cur:
+            cur.execute(
+                fallback_query,
+                (route_id,),
+            )
+
+            fallback_row = cur.fetchone()
+
+        if fallback_row:
+            service_id = str(
+                fallback_row[0]
+            )
+        else:
+            return None
+
+    if _route_service_cache is not None:
+        _route_service_cache[route_service_key] = service_id
+
+    direction_key = (
+        str(direction_id)
+        if direction_id is not None
+        else "*"
+    )
+
+    cache_key = (
+        str(route_id),
+        direction_key,
+        str(service_id),
+        str(stop_id),
+    )
+
+    candidates = None
+
+    if _candidate_cache is not None:
+        candidates = _candidate_cache.get(
+            cache_key
+        )
+
+    if candidates is None:
+
+        if direction_id is not None:
+            query = """
+                SELECT
+                    t.trip_id,
+                    t.route_id,
+                    t.direction_id,
+                    t.service_id,
+                    t.trip_headsign,
+                    st.stop_id,
+                    st.stop_sequence,
+                    st.arrival_time,
+                    st.departure_time
+                FROM gtfs_trips t
+                JOIN gtfs_stop_times st
+                  ON st.trip_id = t.trip_id
+                WHERE t.route_id = %s
+                  AND t.direction_id = %s
+                  AND t.service_id = %s
+                  AND st.stop_id = %s;
+            """
+
+            params = (
+                route_id,
+                direction_id,
+                service_id,
+                stop_id,
+            )
+
+        else:
+            query = """
+                SELECT
+                    t.trip_id,
+                    t.route_id,
+                    t.direction_id,
+                    t.service_id,
+                    t.trip_headsign,
+                    st.stop_id,
+                    st.stop_sequence,
+                    st.arrival_time,
+                    st.departure_time
+                FROM gtfs_trips t
+                JOIN gtfs_stop_times st
+                  ON st.trip_id = t.trip_id
+                WHERE t.route_id = %s
+                  AND t.service_id = %s
+                  AND st.stop_id = %s;
+            """
+
+            params = (
+                route_id,
+                service_id,
+                stop_id,
+            )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                query,
+                params,
+            )
+
+            rows = cur.fetchall()
+
+        columns = [
+            "trip_id",
+            "route_id",
+            "direction_id",
+            "service_id",
+            "trip_headsign",
+            "stop_id",
+            "stop_sequence",
+            "arrival_time",
+            "departure_time",
+        ]
+
+        candidates = pd.DataFrame(
+            rows,
+            columns=columns,
+        )
+
+        if _candidate_cache is not None:
+            _candidate_cache[cache_key] = candidates
+
+    if candidates.empty:
+        return None
+
+    best = None
+    best_distance = None
+
+    for row in candidates.itertuples(
+        index=False
+    ):
+
+        scheduled_text = (
+            row.departure_time
+            or row.arrival_time
+        )
+
+        scheduled_local = _gtfs_datetime(
+            service_date,
+            scheduled_text,
+        )
+
+        if scheduled_local is None:
+            continue
+
+        distance_minutes = abs(
+            (
+                actual_local
+                - scheduled_local
+            ).total_seconds()
+            / 60.0
+        )
+
+        if (
+            best_distance is None
+            or distance_minutes < best_distance
+        ):
+            best_distance = distance_minutes
+            best = (
+                row,
+                scheduled_local,
+            )
+
+    if best is None:
+        return None
+
+    row, scheduled_local = best
+
+    if (
+        best_distance
+        > MAX_TRIP_START_DISTANCE_MINUTES
+    ):
+        return None
+
+    delay_minutes = (
+        actual_local
+        - scheduled_local
+    ).total_seconds() / 60.0
+
+    return {
+        "trip_id": row.trip_id,
+        "route_id": row.route_id,
+        "direction_id": row.direction_id,
+        "stop_id": row.stop_id,
+        "stop_sequence": int(
+            row.stop_sequence
+        ),
+        "scheduled_time": scheduled_local,
+        "actual_time": actual_local,
+        "delay_minutes": round(
+            delay_minutes,
+            2,
+        ),
+        "match_distance_minutes": round(
+            best_distance,
+            2,
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Reliability observations
+# ---------------------------------------------------------------------------
+
+
+def get_reliability_observations(
+    conn,
+    route_id: str | None = None,
+    limit: int = 100,
+) -> pd.DataFrame:
+    """
+    Return realtime observations that can be matched to static GTFS.
+
+    When route_id is not supplied, the newest `limit` observations
+    are selected PER ROUTE.
+
+    When route_id is supplied, the newest `limit` observations
+    for that route are selected.
+
+    Realtime events are allowed to have missing trip_start_date
+    and direction_id.
+    """
+
+    conditions = [
+        "entity_type = 'trip_update'",
+        "route_id IS NOT NULL",
+        "stop_id IS NOT NULL",
+        """
+        (
+            arrival_time IS NOT NULL
+            OR departure_time IS NOT NULL
+        )
+        """,
+    ]
+
+    params: list[object] = []
+
+    if route_id is not None:
+
+        conditions.append(
+            "route_id = %s"
+        )
+
+        params.append(route_id)
+        params.append(limit)
+
+        query = f"""
+            SELECT
+                id,
+                ingested_at,
+                trip_id,
+                trip_start_date,
+                direction_id,
+                route_id,
+                stop_id,
+                arrival_time,
+                departure_time
+            FROM raw_feed_event
+            WHERE {" AND ".join(conditions)}
+            ORDER BY ingested_at DESC
+            LIMIT %s;
+        """
+
+    else:
+
+        params.append(limit)
+
+        query = f"""
+            SELECT
+                id,
+                ingested_at,
+                trip_id,
+                trip_start_date,
+                direction_id,
+                route_id,
+                stop_id,
+                arrival_time,
+                departure_time
+            FROM (
+                SELECT
+                    id,
+                    ingested_at,
+                    trip_id,
+                    trip_start_date,
+                    direction_id,
+                    route_id,
+                    stop_id,
+                    arrival_time,
+                    departure_time,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY route_id
+                        ORDER BY ingested_at DESC
+                    ) AS route_rank
+                FROM raw_feed_event
+                WHERE {" AND ".join(conditions)}
+            ) ranked
+            WHERE route_rank <= %s
+            ORDER BY ingested_at DESC;
+        """
+
+    raw = pd.read_sql(
+        query,
+        conn,
+        params=tuple(params),
+    )
+
+    if raw.empty:
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "ingested_at",
+                "trip_id",
+                "trip_start_date",
+                "direction_id",
+                "route_id",
+                "stop_id",
+                "scheduled_time",
+                "actual_time",
+                "delay_minutes",
+                "match_distance_minutes",
+            ]
+        )
+
+    results = []
+
+    service_id_cache: dict[
+        date,
+        str | None,
+    ] = {}
+
+    candidate_cache: dict[
+        tuple,
+        pd.DataFrame,
+    ] = {}
+
+    for row in raw.itertuples(
+        index=False
+    ):
+
+        actual_time = (
+            row.arrival_time
+            or row.departure_time
+        )
+
+        if actual_time is None:
+            continue
+
+        trip_start_date = (
+            str(row.trip_start_date)
+            if row.trip_start_date is not None
+            else None
+        )
+
+        direction_id = (
+            str(row.direction_id)
+            if row.direction_id is not None
+            else None
+        )
+
+        match = resolve_realtime_event(
+            conn=conn,
+            route_id=str(row.route_id),
+            direction_id=direction_id,
+            trip_start_date=trip_start_date,
+            stop_id=str(row.stop_id),
+            actual_time=actual_time,
+            _service_id_cache=service_id_cache,
+            _candidate_cache=candidate_cache,
+        )
+
+        if match is None:
+            continue
+
+        # Preserve the feed's service date when available.
+        # Otherwise derive the date from the same local-clock
+        # interpretation used by the resolver.
+        derived_trip_start_date = (
+            row.trip_start_date
+            if row.trip_start_date is not None
+            else actual_time
+            .replace(tzinfo=NEW_YORK_TZ)
+            .strftime("%Y%m%d")
+        )
+
+        derived_direction_id = (
+            row.direction_id
+            if row.direction_id is not None
+            else match["direction_id"]
+        )
+
+        results.append(
+            {
+                "id": row.id,
+                "ingested_at": row.ingested_at,
+                "trip_id": row.trip_id,
+                "trip_start_date": derived_trip_start_date,
+                "direction_id": derived_direction_id,
+                "route_id": row.route_id,
+                "stop_id": row.stop_id,
+                "scheduled_time": match[
+                    "scheduled_time"
+                ],
+                "actual_time": match[
+                    "actual_time"
+                ],
+                "delay_minutes": match[
+                    "delay_minutes"
+                ],
+                "match_distance_minutes": match[
+                    "match_distance_minutes"
+                ],
+            }
+        )
+
+    return pd.DataFrame(results)
+
+
+# ---------------------------------------------------------------------------
+# Route Reliability
+# ---------------------------------------------------------------------------
+
+
+def get_route_health(
+    conn,
+) -> pd.DataFrame:
+    """
+    Return real route-level reliability metrics.
+
+    Metrics:
+        - feed_events
+        - active_stations
+        - observations_matched
+        - on_time_percent
+        - average_delay_minutes
+        - reliability_score
+        - status
+    """
+
+    observations = get_reliability_observations(
+        conn,
+        limit=100,
+    )
+
+    routes = pd.read_sql(
+        """
+        SELECT
+            route_id,
+            COUNT(*) AS feed_events,
+            COUNT(DISTINCT stop_id) AS active_stations
+        FROM raw_feed_event
+        WHERE route_id IS NOT NULL
+        GROUP BY route_id
+        ORDER BY route_id;
+        """,
+        conn,
+    )
+
+    if routes.empty:
+        return routes
+
+    if observations.empty:
+
+        routes["observations_matched"] = 0
+        routes["on_time_percent"] = pd.NA
+        routes["average_delay_minutes"] = pd.NA
+        routes["reliability_score"] = pd.NA
+        routes["status"] = "⚪ No matched data"
+
+        return routes
+
+    observations["on_time"] = (
+        observations["delay_minutes"]
+        <= ON_TIME_THRESHOLD_MINUTES
+    )
+
+    reliability = (
+        observations
+        .groupby("route_id")
+        .agg(
+            observations_matched=(
+                "delay_minutes",
+                "count",
+            ),
+            on_time_percent=(
+                "on_time",
+                "mean",
+            ),
+            average_delay_minutes=(
+                "delay_minutes",
+                "mean",
+            ),
+        )
+        .reset_index()
+    )
+
+    reliability["on_time_percent"] = (
+        reliability["on_time_percent"]
+        * 100
+    ).round(1)
+
+    reliability["average_delay_minutes"] = (
+        reliability["average_delay_minutes"]
+        .round(2)
+    )
+
+    routes = routes.merge(
+        reliability,
+        on="route_id",
+        how="left",
+    )
+
+    routes["reliability_score"] = (
+        routes["on_time_percent"]
+    )
+
+    def status(score):
+
+        if pd.isna(score):
+            return "⚪ No matched data"
+
+        if score >= 90:
+            return "🟢 Excellent"
+
+        if score >= 75:
+            return "🟡 Good"
+
+        return "🔴 Poor"
+
+    routes["status"] = (
+        routes["reliability_score"]
+        .apply(status)
+    )
+
+    return routes
+
+
+# ---------------------------------------------------------------------------
+# Best Route
+# ---------------------------------------------------------------------------
+
+
+def best_route(
+    df: pd.DataFrame,
+):
+    """
+    Return the route with the highest real reliability score.
+    """
+
+    if df.empty:
+        return None
+
+    valid = df[
+        df["reliability_score"].notna()
+    ]
+
+    if valid.empty:
+        return None
+
+    return valid.loc[
+        valid["reliability_score"].idxmax()
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Worst Route
+# ---------------------------------------------------------------------------
+
+
+def worst_route(
+    df: pd.DataFrame,
+):
+    """
+    Return the route with the lowest real reliability score.
+    """
+
+    if df.empty:
+        return None
+
+    valid = df[
+        df["reliability_score"].notna()
+    ]
+
+    if valid.empty:
+        return None
+
+    return valid.loc[
+        valid["reliability_score"].idxmin()
+    ]
+
+
+
+
