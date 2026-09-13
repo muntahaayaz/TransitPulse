@@ -36,6 +36,9 @@ from src.analytics.analytics import (
     get_timeline,
     get_top_stations,
     get_train_locations,
+    get_line_reliability,
+    get_station_delay_concentration,
+    get_time_window_delay_concentration,
 )
 
 from src.analytics.sidebar import show_sidebar
@@ -519,6 +522,42 @@ try:
     st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
 
     show_top_stations(top_stops)
+
+    # -----------------------------------------------------------------------
+    # M2 Reliability Breakdown
+    # -----------------------------------------------------------------------
+    section_header(
+        "03 / Reliability Breakdown",
+        "Line, Station & Time Performance",
+        "Reliability by subway line, delay concentration by station, and hourly delay patterns.",
+    )
+
+    reliability = get_line_reliability(engine)
+    station_delays = get_station_delay_concentration(engine, limit=10)
+    hourly_delays = get_time_window_delay_concentration(engine)
+
+    st.subheader("Line Reliability")
+    st.dataframe(reliability, use_container_width=True, hide_index=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("Stations with Highest Delay")
+        st.dataframe(
+            station_delays,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with col2:
+        st.subheader("Delay by Hour")
+        st.dataframe(
+            hourly_delays,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
 
     # -----------------------------------------------------------------------
     # Operations timeline

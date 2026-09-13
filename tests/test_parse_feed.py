@@ -89,3 +89,10 @@ def test_parse_feed_handles_empty_feed():
     results = parse_feed(feed.SerializeToString())
 
     assert results == []
+
+def test_m2_aggregation_helpers():
+    import pandas as pd
+    from src.analytics.analytics import get_station_delay_concentration
+
+    assert callable(get_station_delay_concentration)
+    assert pd.DataFrame is not None
