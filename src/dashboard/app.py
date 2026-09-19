@@ -56,6 +56,7 @@ from src.analytics.charts import (
     show_top_routes,
     show_top_stations,
     show_delay_by_hour,
+    show_reliability_trend,
 )
 
 from src.analytics.tables import (
@@ -585,6 +586,11 @@ try:
     st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
 
     st.subheader("Historical Reliability Trend")
+    st.caption(
+        "Historical reliability reflects the available data collection window "
+        "only; it is not a complete historical archive."
+    )
+    show_reliability_trend(reliability_trend)
     st.dataframe(
         reliability_trend,
         use_container_width=True,

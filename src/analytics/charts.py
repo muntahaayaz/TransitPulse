@@ -529,3 +529,46 @@ def show_live_map(train_df: pd.DataFrame) -> None:
         f"{count:,} live vehicle location"
         f"{'' if count == 1 else 's'} displayed"
     )
+
+
+def show_reliability_trend(trend: pd.DataFrame) -> None:
+    """Display weekly historical reliability trend."""
+    st.subheader("Historical Reliability Trend")
+
+    if trend.empty:
+        _empty_state("No historical reliability data available.")
+        return
+
+    data = trend.copy()
+
+    fig = px.line(
+        data,
+        x="week",
+        y="on_time_percent",
+        markers=True,
+        labels={
+            "week": "Week",
+            "on_time_percent": "On-Time Performance (%)",
+        },
+    )
+
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{x}</b><br>"
+            "On-time: %{y:.1f}%"
+            "<extra></extra>"
+        ),
+    )
+
+    _apply_layout(fig, height=400)
+    fig.update_xaxes(title_text="Week")
+    fig.update_yaxes(
+        title_text="On-Time Performance (%)",
+        range=[0, 100],
+    )
+
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        config=_chart_config(),
+    )
