@@ -636,6 +636,11 @@ def get_reliability_observations(
         pd.DataFrame,
     ] = {}
 
+    route_service_cache: dict[
+        tuple[str, str],
+        str | None,
+    ] = {}
+
     for row in raw.itertuples(
         index=False
     ):
@@ -669,6 +674,7 @@ def get_reliability_observations(
             actual_time=actual_time,
             _service_id_cache=service_id_cache,
             _candidate_cache=candidate_cache,
+            _route_service_cache=route_service_cache,
         )
 
         if match is None:
@@ -725,6 +731,7 @@ def get_reliability_observations(
 
 def get_route_health(
     conn,
+    observations=None,
 ) -> pd.DataFrame:
     """
     Return real route-level reliability metrics.
@@ -739,10 +746,11 @@ def get_route_health(
         - status
     """
 
-    observations = get_reliability_observations(
-        conn,
-        limit=100,
-    )
+    if observations is None:
+        observations = get_reliability_observations(
+            conn,
+            limit=100,
+        )
 
     routes = pd.read_sql(
         """
@@ -890,6 +898,140 @@ def worst_route(
         valid["reliability_score"].idxmin()
     ]
 
+
+
+
+def get_historical_reliability_observations(
+    conn,
+    per_route_per_week: int = 10,
+) -> pd.DataFrame:
+    """Return a bounded historical sample resolved against static GTFS."""
+
+    conditions = [
+        "entity_type = 'trip_update'",
+        "route_id IN ('1','2','3','4','5','6','7')",
+        "stop_id IS NOT NULL",
+        "(arrival_time IS NOT NULL OR departure_time IS NOT NULL)",
+    ]
+
+    query = f"""
+        SELECT
+            id,
+            ingested_at,
+            trip_id,
+            trip_start_date,
+            direction_id,
+            route_id,
+            stop_id,
+            arrival_time,
+            departure_time
+        FROM (
+            SELECT
+                id,
+                ingested_at,
+                trip_id,
+                trip_start_date,
+                direction_id,
+                route_id,
+                stop_id,
+                arrival_time,
+                departure_time,
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        route_id,
+                        DATE_TRUNC(
+                            'week',
+                            COALESCE(arrival_time, departure_time)
+                        )
+                    ORDER BY ingested_at DESC
+                ) AS week_rank
+            FROM raw_feed_event
+            WHERE {" AND ".join(conditions)}
+        ) ranked
+        WHERE week_rank <= %s
+        ORDER BY ingested_at DESC;
+    """
+
+    raw = pd.read_sql(query, conn, params=(per_route_per_week,))
+
+    columns = [
+        "id",
+        "ingested_at",
+        "trip_id",
+        "trip_start_date",
+        "direction_id",
+        "route_id",
+        "stop_id",
+        "scheduled_time",
+        "actual_time",
+        "delay_minutes",
+        "match_distance_minutes",
+    ]
+
+    if raw.empty:
+        return pd.DataFrame(columns=columns)
+
+    results = []
+    service_id_cache = {}
+    candidate_cache = {}
+    route_service_cache = {}
+
+    for row in raw.itertuples(index=False):
+        actual_time = row.arrival_time or row.departure_time
+        if actual_time is None:
+            continue
+
+        trip_start_date = (
+            str(row.trip_start_date)
+            if row.trip_start_date is not None
+            else None
+        )
+        direction_id = (
+            str(row.direction_id)
+            if row.direction_id is not None
+            else None
+        )
+
+        match = resolve_realtime_event(
+            conn=conn,
+            route_id=str(row.route_id),
+            direction_id=direction_id,
+            trip_start_date=trip_start_date,
+            stop_id=str(row.stop_id),
+            actual_time=actual_time,
+            _service_id_cache=service_id_cache,
+            _candidate_cache=candidate_cache,
+            _route_service_cache=route_service_cache,
+        )
+
+        if match is None:
+            continue
+
+        results.append({
+            "id": row.id,
+            "ingested_at": row.ingested_at,
+            "trip_id": row.trip_id,
+            "trip_start_date": (
+                row.trip_start_date
+                if row.trip_start_date is not None
+                else actual_time.replace(
+                    tzinfo=NEW_YORK_TZ
+                ).strftime("%Y%m%d")
+            ),
+            "direction_id": (
+                row.direction_id
+                if row.direction_id is not None
+                else match["direction_id"]
+            ),
+            "route_id": row.route_id,
+            "stop_id": row.stop_id,
+            "scheduled_time": match["scheduled_time"],
+            "actual_time": match["actual_time"],
+            "delay_minutes": match["delay_minutes"],
+            "match_distance_minutes": match["match_distance_minutes"],
+        })
+
+    return pd.DataFrame(results, columns=columns)
 
 
 

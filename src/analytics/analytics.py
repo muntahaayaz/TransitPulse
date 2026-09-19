@@ -253,17 +253,26 @@ def get_train_locations(conn, where_clause=""):
 # M2 Reliability Breakdowns
 # --------------------------------------------------
 
-def get_line_reliability(conn):
+def get_line_reliability(conn, observations=None):
     """Return reliability metrics by subway line."""
     from src.analytics.reliability import get_route_health
-    return get_route_health(conn)
+
+    if observations is None:
+        from src.analytics.reliability import get_reliability_observations
+        observations = get_reliability_observations(conn, limit=100)
+
+    return get_route_health(conn, observations=observations)
 
 
-def get_station_delay_concentration(conn, limit=20):
+def get_station_delay_concentration(conn, limit=20, observations=None):
     """Return stations with the highest observed average delay."""
     from src.analytics.reliability import get_reliability_observations
 
-    obs = get_reliability_observations(conn, limit=100)
+    obs = (
+        observations
+        if observations is not None
+        else get_reliability_observations(conn, limit=100)
+    )
     if obs.empty:
         return pd.DataFrame(
             columns=[
@@ -300,11 +309,15 @@ def get_station_delay_concentration(conn, limit=20):
     return result
 
 
-def get_time_window_delay_concentration(conn):
+def get_time_window_delay_concentration(conn, observations=None):
     """Return delay concentration by hour of day."""
     from src.analytics.reliability import get_reliability_observations
 
-    obs = get_reliability_observations(conn, limit=100)
+    obs = (
+        observations
+        if observations is not None
+        else get_reliability_observations(conn, limit=100)
+    )
     if obs.empty:
         return pd.DataFrame(
             columns=[
@@ -324,6 +337,59 @@ def get_time_window_delay_concentration(conn):
 
     result = (
         data.groupby("hour")
+        .agg(
+            observations=("delay_minutes", "count"),
+            average_delay_minutes=("delay_minutes", "mean"),
+            on_time_percent=("on_time", "mean"),
+        )
+        .sort_index()
+        .reset_index()
+    )
+
+    result["average_delay_minutes"] = result["average_delay_minutes"].round(2)
+    result["on_time_percent"] = (result["on_time_percent"] * 100).round(1)
+
+    return result
+
+# --------------------------------------------------
+# M3 Historical Reliability Trend
+# --------------------------------------------------
+
+def get_reliability_trend(conn):
+    """Return weekly reliability trend for numbered MVP lines."""
+    from src.analytics.reliability import get_historical_reliability_observations
+
+    obs = get_historical_reliability_observations(conn, per_route_per_week=2)
+
+    if obs.empty:
+        return pd.DataFrame(
+            columns=[
+                "week",
+                "observations",
+                "average_delay_minutes",
+                "on_time_percent",
+            ]
+        )
+
+    data = obs[
+        obs["route_id"].isin(["1", "2", "3", "4", "5", "6", "7"])
+    ].dropna(subset=["actual_time", "delay_minutes"]).copy()
+
+    if data.empty:
+        return pd.DataFrame(
+            columns=[
+                "week",
+                "observations",
+                "average_delay_minutes",
+                "on_time_percent",
+            ]
+        )
+
+    data["week"] = data["actual_time"].dt.tz_localize(None).dt.to_period("W").astype(str)
+    data["on_time"] = data["delay_minutes"].abs() <= 5
+
+    result = (
+        data.groupby("week")
         .agg(
             observations=("delay_minutes", "count"),
             average_delay_minutes=("delay_minutes", "mean"),

@@ -357,6 +357,70 @@ def show_timeline(timeline: pd.DataFrame) -> None:
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Delay by Hour
+# ---------------------------------------------------------------------------
+
+
+def show_delay_by_hour(hourly_delays: pd.DataFrame) -> None:
+    """Display average delay by hour of day."""
+
+    st.subheader("Delay by Hour")
+
+    if hourly_delays.empty:
+        _empty_state(
+            "No hourly delay data available."
+        )
+        return
+
+    data = hourly_delays.copy()
+    data["hour"] = data["hour"].astype(int)
+
+    fig = px.bar(
+        data,
+        x="hour",
+        y="average_delay_minutes",
+        text="average_delay_minutes",
+        labels={
+            "hour": "Hour of Day",
+            "average_delay_minutes": "Average Delay (minutes)",
+        },
+    )
+
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{x}:00</b><br>"
+            "Average delay: %{y:.2f} min"
+            "<extra></extra>"
+        ),
+        texttemplate="%{y:.2f}",
+        textposition="outside",
+    )
+
+    _apply_layout(
+        fig,
+        height=400,
+    )
+
+    fig.update_xaxes(
+        dtick=1,
+        tickmode="linear",
+        title_text="Hour of Day",
+    )
+
+    fig.update_yaxes(
+        title_text="Average Delay (minutes)",
+    )
+
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        config=_chart_config(),
+    )
+
+
+
 # ---------------------------------------------------------------------------
 # Live Subway Map
 # ---------------------------------------------------------------------------

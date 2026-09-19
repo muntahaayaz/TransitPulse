@@ -1,4 +1,4 @@
-﻿"""
+"""
 TransitPulse Dashboard
 
 Premium dashboard shell built on top of the existing analytics layer.
@@ -25,7 +25,7 @@ _PROJECT_ROOT = os.path.dirname(
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from src.db.connection import get_engine
+from src.db.connection import get_engine, get_connection
 
 from src.analytics.analytics import (
     build_where,
@@ -39,6 +39,7 @@ from src.analytics.analytics import (
     get_line_reliability,
     get_station_delay_concentration,
     get_time_window_delay_concentration,
+    get_reliability_trend,
 )
 
 from src.analytics.sidebar import show_sidebar
@@ -54,6 +55,7 @@ from src.analytics.charts import (
     show_timeline,
     show_top_routes,
     show_top_stations,
+    show_delay_by_hour,
 )
 
 from src.analytics.tables import (
@@ -532,9 +534,32 @@ try:
         "Reliability by subway line, delay concentration by station, and hourly delay patterns.",
     )
 
-    reliability = get_line_reliability(engine)
-    station_delays = get_station_delay_concentration(engine, limit=10)
-    hourly_delays = get_time_window_delay_concentration(engine)
+    reliability_conn = get_connection()
+
+    from src.analytics.reliability import get_reliability_observations
+
+    reliability_observations = get_reliability_observations(
+        reliability_conn,
+        limit=5,
+    )
+
+    reliability = get_line_reliability(
+        reliability_conn,
+        observations=reliability_observations,
+    )
+
+    station_delays = get_station_delay_concentration(
+        reliability_conn,
+        limit=10,
+        observations=reliability_observations,
+    )
+
+    hourly_delays = get_time_window_delay_concentration(
+        reliability_conn,
+        observations=reliability_observations,
+    )
+
+    reliability_trend = get_reliability_trend(reliability_conn)
 
     st.subheader("Line Reliability")
     st.dataframe(reliability, use_container_width=True, hide_index=True)
@@ -550,7 +575,7 @@ try:
         )
 
     with col2:
-        st.subheader("Delay by Hour")
+        show_delay_by_hour(hourly_delays)
         st.dataframe(
             hourly_delays,
             use_container_width=True,
@@ -558,6 +583,13 @@ try:
         )
 
     st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
+
+    st.subheader("Historical Reliability Trend")
+    st.dataframe(
+        reliability_trend,
+        use_container_width=True,
+        hide_index=True,
+    )
 
     # -----------------------------------------------------------------------
     # Operations timeline
