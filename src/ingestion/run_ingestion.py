@@ -65,6 +65,10 @@ RUN_DURATION_SECONDS = int(
     os.environ.get("RUN_DURATION_SECONDS", str(8 * 60))
 )
 
+RAW_EVENT_RETENTION_DAYS = int(
+    os.environ.get("RAW_EVENT_RETENTION_DAYS", "3")
+)
+
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
@@ -148,8 +152,8 @@ def run() -> int:
     Run one bounded ingestion workflow.
 
     Returns:
-        0 for success or partial failure.
-        1 for a complete failure.
+        0 when the run completes without poll failures.
+        1 when the run has a complete or partial failure.
     """
 
     started_at = datetime.now(timezone.utc)
@@ -185,9 +189,10 @@ def run() -> int:
         deadline = time.monotonic() + RUN_DURATION_SECONDS
 
         logger.info(
-            "Starting ingestion run: duration=%ss interval=%ss",
+            "Starting ingestion run: duration=%ss interval=%ss retention=%sd",
             RUN_DURATION_SECONDS,
             POLL_INTERVAL_SECONDS,
+            RAW_EVENT_RETENTION_DAYS,
         )
 
         while time.monotonic() < deadline:
@@ -351,7 +356,9 @@ def run() -> int:
         total_written,
     )
 
-    return 0 if status != "failure" else 1
+    # Treat partial failures as failures so GitHub Actions cannot
+    # report a green run when ingestion actually failed.
+    return 0 if status == "success" else 1
 
 
 # ---------------------------------------------------------------------------
@@ -364,8 +371,8 @@ def _write_records(
     records: list[ParsedEntity],
 ) -> int:
     """
-    Write parsed feed records to PostgreSQL using PostgreSQL's
-    execute_values bulk-insert mechanism.
+    Delete raw events outside the retention window, then write the
+    current feed records using PostgreSQL's execute_values bulk insert.
 
     Returns:
         Number of records written.
@@ -376,6 +383,55 @@ def _write_records(
             "No records to write."
         )
         return 0
+
+    # -----------------------------------------------------------------------
+    # Retention cleanup
+    # -----------------------------------------------------------------------
+
+    logger.info(
+        "Running raw event retention cleanup: keeping %d days.",
+        RAW_EVENT_RETENTION_DAYS,
+    )
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM raw_feed_event
+                WHERE ingested_at < NOW() - (%s * INTERVAL '1 day')
+                """,
+                (RAW_EVENT_RETENTION_DAYS,),
+            )
+
+            deleted = cur.rowcount
+
+        conn.commit()
+
+        if deleted:
+            logger.info(
+                "Retention cleanup deleted %d raw events older than %d days.",
+                deleted,
+                RAW_EVENT_RETENTION_DAYS,
+            )
+        else:
+            logger.info(
+                "Retention cleanup deleted no rows."
+            )
+
+    except Exception:
+        if not conn.closed:
+            try:
+                conn.rollback()
+            except Exception:
+                logger.exception(
+                    "Database rollback failed after retention cleanup error."
+                )
+
+        raise
+
+    # -----------------------------------------------------------------------
+    # Prepare rows
+    # -----------------------------------------------------------------------
 
     rows = [
         (
