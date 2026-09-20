@@ -356,12 +356,30 @@ def get_time_window_delay_concentration(conn, observations=None):
 # --------------------------------------------------
 
 def get_reliability_trend(conn):
-    """Return weekly reliability trend for numbered MVP lines."""
-    from src.analytics.reliability import get_historical_reliability_observations
+    """Return weekly reliability trend from permanent M3 history."""
 
-    obs = get_historical_reliability_observations(conn, per_route_per_week=2)
+    query = """
+        SELECT
+            week,
+            SUM(observations) AS observations,
+            ROUND(
+                SUM(average_delay_minutes * observations)
+                / NULLIF(SUM(observations), 0),
+                2
+            ) AS average_delay_minutes,
+            ROUND(
+                SUM(on_time_percent * observations)
+                / NULLIF(SUM(observations), 0),
+                1
+            ) AS on_time_percent
+        FROM reliability_weekly
+        GROUP BY week
+        ORDER BY week;
+    """
 
-    if obs.empty:
+    result = pd.read_sql(query, conn)
+
+    if result.empty:
         return pd.DataFrame(
             columns=[
                 "week",
@@ -371,35 +389,6 @@ def get_reliability_trend(conn):
             ]
         )
 
-    data = obs[
-        obs["route_id"].isin(["1", "2", "3", "4", "5", "6", "7"])
-    ].dropna(subset=["actual_time", "delay_minutes"]).copy()
-
-    if data.empty:
-        return pd.DataFrame(
-            columns=[
-                "week",
-                "observations",
-                "average_delay_minutes",
-                "on_time_percent",
-            ]
-        )
-
-    data["week"] = data["actual_time"].dt.tz_localize(None).dt.to_period("W").astype(str)
-    data["on_time"] = data["delay_minutes"].abs() <= 5
-
-    result = (
-        data.groupby("week")
-        .agg(
-            observations=("delay_minutes", "count"),
-            average_delay_minutes=("delay_minutes", "mean"),
-            on_time_percent=("on_time", "mean"),
-        )
-        .sort_index()
-        .reset_index()
-    )
-
-    result["average_delay_minutes"] = result["average_delay_minutes"].round(2)
-    result["on_time_percent"] = (result["on_time_percent"] * 100).round(1)
+    result["week"] = result["week"].astype(str)
 
     return result

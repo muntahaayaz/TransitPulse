@@ -366,6 +366,97 @@ def run() -> int:
 # ---------------------------------------------------------------------------
 
 
+
+def _archive_m3_history(conn) -> None:
+    """Persist weekly M3 reliability history before raw-event retention."""
+
+    logger.info("Updating permanent M3 weekly reliability history...")
+
+    from src.analytics.reliability import (
+        get_historical_reliability_observations,
+    )
+
+    obs = get_historical_reliability_observations(
+        conn,
+        per_route_per_week=2,
+    )
+
+    if obs.empty:
+        logger.info("M3 archive: no resolvable historical observations.")
+        return
+
+    obs = obs[
+        obs["route_id"].isin(["1", "2", "3", "4", "5", "6", "7"])
+    ].dropna(
+        subset=["actual_time", "delay_minutes"]
+    ).copy()
+
+    if obs.empty:
+        logger.info("M3 archive: no numbered-line observations.")
+        return
+
+    obs["week"] = (
+        obs["actual_time"]
+        .dt.tz_localize(None)
+        .dt.to_period("W")
+        .apply(lambda p: p.start_time.date())
+    )
+
+    obs["on_time"] = obs["delay_minutes"].abs() <= 5
+
+    weekly = (
+        obs.groupby(["week", "route_id"])
+        .agg(
+            observations=("delay_minutes", "count"),
+            average_delay_minutes=("delay_minutes", "mean"),
+            on_time_percent=("on_time", "mean"),
+        )
+        .reset_index()
+    )
+
+    weekly["average_delay_minutes"] = (
+        weekly["average_delay_minutes"].round(2)
+    )
+
+    weekly["on_time_percent"] = (
+        weekly["on_time_percent"] * 100
+    ).round(1)
+
+    with conn.cursor() as cur:
+        for row in weekly.itertuples(index=False):
+            cur.execute(
+                """
+                INSERT INTO reliability_weekly (
+                    week,
+                    route_id,
+                    observations,
+                    average_delay_minutes,
+                    on_time_percent
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (week, route_id)
+                DO UPDATE SET
+                    observations = EXCLUDED.observations,
+                    average_delay_minutes = EXCLUDED.average_delay_minutes,
+                    on_time_percent = EXCLUDED.on_time_percent;
+                """,
+                (
+                    row.week,
+                    row.route_id,
+                    int(row.observations),
+                    float(row.average_delay_minutes),
+                    float(row.on_time_percent),
+                ),
+            )
+
+    conn.commit()
+
+    logger.info(
+        "M3 weekly history updated: %d route-week rows.",
+        len(weekly),
+    )
+
+
 def _write_records(
     conn,
     records: list[ParsedEntity],
@@ -383,51 +474,6 @@ def _write_records(
             "No records to write."
         )
         return 0
-
-    # -----------------------------------------------------------------------
-    # Retention cleanup
-    # -----------------------------------------------------------------------
-
-    logger.info(
-        "Running raw event retention cleanup: keeping %d days.",
-        RAW_EVENT_RETENTION_DAYS,
-    )
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                DELETE FROM raw_feed_event
-                WHERE ingested_at < NOW() - (%s * INTERVAL '1 day')
-                """,
-                (RAW_EVENT_RETENTION_DAYS,),
-            )
-
-            deleted = cur.rowcount
-
-        conn.commit()
-
-        if deleted:
-            logger.info(
-                "Retention cleanup deleted %d raw events older than %d days.",
-                deleted,
-                RAW_EVENT_RETENTION_DAYS,
-            )
-        else:
-            logger.info(
-                "Retention cleanup deleted no rows."
-            )
-
-    except Exception:
-        if not conn.closed:
-            try:
-                conn.rollback()
-            except Exception:
-                logger.exception(
-                    "Database rollback failed after retention cleanup error."
-                )
-
-        raise
 
     # -----------------------------------------------------------------------
     # Prepare rows
@@ -482,6 +528,47 @@ def _write_records(
             )
 
         conn.commit()
+
+        _archive_m3_history(conn)
+
+        logger.info(
+            "Running raw event retention cleanup: keeping %d days.",
+            RAW_EVENT_RETENTION_DAYS,
+        )
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM raw_feed_event
+                    WHERE ingested_at < NOW() - (%s * INTERVAL '1 day')
+                    """,
+                    (RAW_EVENT_RETENTION_DAYS,),
+                )
+
+                deleted = cur.rowcount
+
+            conn.commit()
+
+            if deleted:
+                logger.info(
+                    "Retention cleanup deleted %d raw events older than %d days.",
+                    deleted,
+                    RAW_EVENT_RETENTION_DAYS,
+                )
+            else:
+                logger.info("Retention cleanup deleted no rows.")
+
+        except Exception:
+            if not conn.closed:
+                try:
+                    conn.rollback()
+                except Exception:
+                    logger.exception(
+                        "Database rollback failed after retention cleanup error."
+                    )
+            raise
+
 
     except Exception:
         if not conn.closed:
