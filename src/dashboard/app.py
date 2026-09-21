@@ -1,4 +1,4 @@
-"""
+﻿"""
 TransitPulse Dashboard
 
 Premium dashboard shell built on top of the existing analytics layer.
@@ -73,7 +73,7 @@ from src.analytics.tables import (
 
 st.set_page_config(
     page_title="TransitPulse",
-    page_icon="🚇",
+    page_icon="ðŸš‡",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -445,7 +445,7 @@ st.markdown(
                 LIVE DATA PIPELINE
             </div>
             <div class="tp-meta">
-                Realtime feed monitoring · 30 second refresh
+                Realtime feed monitoring Â· 30 second refresh
             </div>
         </div>
     </div>
@@ -514,7 +514,7 @@ try:
     with c4:
         st.metric(
             label="Network On-Time",
-            value="?",
+            value="—"?",
         )
 
     with c5:
@@ -766,10 +766,10 @@ try:
         <div class="tp-footer">
             <div>
                 <strong>TransitPulse</strong>
-                &nbsp;·&nbsp; NYC Subway Intelligence
+                &nbsp;Â·&nbsp; NYC Subway Intelligence
             </div>
             <div>
-                PostgreSQL&nbsp; · &nbsp;Python&nbsp; · &nbsp;Streamlit&nbsp; · &nbsp;Plotly
+                PostgreSQL&nbsp; Â· &nbsp;Python&nbsp; Â· &nbsp;Streamlit&nbsp; Â· &nbsp;Plotly
             </div>
         </div>
         """,
@@ -779,3 +779,4 @@ try:
 finally:
     if "engine" in locals():
         engine.dispose()
+
