@@ -477,13 +477,65 @@ try:
     # -----------------------------------------------------------------------
 
     section_header(
-        "01 / Network",
+        "01 / NETWORK",
         "System Overview",
-        "A live snapshot of the NYC subway data pipeline.",
+        "A live snapshot of the NYC subway network and reliability.",
     )
 
     metrics = get_metrics(engine)
-    show_metrics(metrics)
+
+    # Reliability data for the headline KPI
+    reliability_conn = get_connection()
+
+    from src.analytics.reliability import get_reliability_observations
+
+    reliability_observations = get_reliability_observations(
+        reliability_conn,
+        limit=100,
+    )
+
+    reliability = get_line_reliability(
+        reliability_conn,
+        observations=reliability_observations,
+    )
+
+    overall_on_time = None
+    if not reliability.empty and "on_time_percent" in reliability.columns:
+        valid_scores = reliability["on_time_percent"].dropna()
+        if not valid_scores.empty:
+            overall_on_time = round(float(valid_scores.mean()), 1)
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+
+    with c1:
+        st.metric(
+            label="Total Feed Events",
+            value=f"{metrics['events']:,}",
+        )
+
+    with c2:
+        st.metric(
+            label="Active Subway Lines",
+            value=f"{metrics['routes']:,}",
+        )
+
+    with c3:
+        st.metric(
+            label="Active Stations",
+            value=f"{metrics['stops']:,}",
+        )
+
+    with c4:
+        st.metric(
+            label="Network On-Time",
+            value=f"{overall_on_time:.1f}%" if overall_on_time is not None else "?",
+        )
+
+    with c5:
+        st.metric(
+            label="Last Feed Update",
+            value=str(metrics["last_update"]),
+        )
 
     st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
 
@@ -496,7 +548,7 @@ try:
     st.divider()
 
     section_header(
-        "02 / Analytics",
+        "02 / ANALYTICS",
         "Network Performance",
         "Distribution and activity across routes and stations.",
     )
@@ -527,27 +579,42 @@ try:
     show_top_stations(top_stops)
 
     # -----------------------------------------------------------------------
-    # M2 Reliability Breakdown
+    # Reliability
     # -----------------------------------------------------------------------
+
+    st.divider()
+
     section_header(
-        "03 / Reliability Breakdown",
+        "03 / RELIABILITY",
         "Line, Station & Time Performance",
-        "Reliability by subway line, delay concentration by station, and hourly delay patterns.",
+        "The core reliability view: route performance first, then delay concentration and time patterns.",
     )
 
-    reliability_conn = get_connection()
+    # Line reliability is the primary view.
+    st.subheader("Line Reliability")
 
-    from src.analytics.reliability import get_reliability_observations
+    if reliability.empty:
+        st.info("No reliability data is currently available.")
+    else:
+        reliability_display = reliability.copy()
 
-    reliability_observations = get_reliability_observations(
-        reliability_conn,
-        limit=5,
-    )
+        preferred_columns = [
+            "route_id",
+            "observations_matched",
+            "on_time_percent",
+            "average_delay_minutes",
+            "status",
+        ]
 
-    reliability = get_line_reliability(
-        reliability_conn,
-        observations=reliability_observations,
-    )
+        reliability_display = reliability_display[
+            [c for c in preferred_columns if c in reliability_display.columns]
+        ]
+
+        st.dataframe(
+            reliability_display,
+            use_container_width=True,
+            hide_index=True,
+        )
 
     station_delays = get_station_delay_concentration(
         reliability_conn,
@@ -560,42 +627,36 @@ try:
         observations=reliability_observations,
     )
 
-    reliability_trend = get_reliability_trend(reliability_conn)
-
-    st.subheader("Line Reliability")
-    st.dataframe(reliability, use_container_width=True, hide_index=True)
-
-    col1, col2 = st.columns(2)
+    col1, col2 = st.columns(2, gap="large")
 
     with col1:
         st.subheader("Stations with Highest Delay")
-        st.dataframe(
-            station_delays,
-            use_container_width=True,
-            hide_index=True,
-        )
+
+        if station_delays.empty:
+            st.info("No station delay data is currently available.")
+        else:
+            st.dataframe(
+                station_delays,
+                use_container_width=True,
+                hide_index=True,
+            )
 
     with col2:
         show_delay_by_hour(hourly_delays)
-        st.dataframe(
-            hourly_delays,
-            use_container_width=True,
-            hide_index=True,
-        )
+
+    # -----------------------------------------------------------------------
+    # Historical reliability
+    # -----------------------------------------------------------------------
 
     st.markdown("<div style='height:0.8rem'></div>", unsafe_allow_html=True)
 
-    st.subheader("Historical Reliability Trend")
+    reliability_trend = get_reliability_trend(reliability_conn)
+
     st.caption(
-        "Historical reliability reflects the available data collection window "
-        "only; it is not a complete historical archive."
+        "Weekly on-time performance from the permanent reliability history archive."
     )
+
     show_reliability_trend(reliability_trend)
-    st.dataframe(
-        reliability_trend,
-        use_container_width=True,
-        hide_index=True,
-    )
 
     # -----------------------------------------------------------------------
     # Operations timeline
@@ -604,7 +665,7 @@ try:
     st.divider()
 
     section_header(
-        "03 / Operations",
+        "04 / OPERATIONS",
         "Operations Timeline",
         "Feed activity and network operating patterns over time.",
     )
@@ -623,7 +684,7 @@ try:
     st.divider()
 
     section_header(
-        "04 / Live Network",
+        "05 / LIVE NETWORK",
         "Live Network View",
         "Realtime train positions supplied by the feed.",
     )
@@ -642,7 +703,7 @@ try:
     st.divider()
 
     section_header(
-        "05 / Rankings",
+        "06 / RANKINGS",
         "Performance Leaderboards",
         "Highest-volume routes and stations in the selected view.",
     )
@@ -665,7 +726,7 @@ try:
     st.divider()
 
     section_header(
-        "06 / Feed",
+        "07 / FEED",
         "Latest Feed Records",
         "Most recently ingested realtime observations.",
     )
@@ -684,7 +745,7 @@ try:
     st.divider()
 
     section_header(
-        "07 / Reliability",
+        "08 / PIPELINE",
         "Pipeline History",
         "Recent ingestion runs and pipeline health.",
     )
