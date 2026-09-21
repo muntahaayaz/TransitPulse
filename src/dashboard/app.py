@@ -514,7 +514,7 @@ try:
     with c4:
         st.metric(
             label="Network On-Time",
-            value="—"?",
+            value="—",
         )
 
     with c5:
