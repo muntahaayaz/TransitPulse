@@ -484,26 +484,12 @@ try:
 
     metrics = get_metrics(engine)
 
-    # Reliability data for the headline KPI
-    reliability_conn = get_connection()
-
-    from src.analytics.reliability import get_reliability_observations
-
-    reliability_observations = get_reliability_observations(
-        reliability_conn,
-        limit=100,
-    )
-
-    reliability = get_line_reliability(
-        reliability_conn,
-        observations=reliability_observations,
-    )
-
-    overall_on_time = None
-    if not reliability.empty and "on_time_percent" in reliability.columns:
-        valid_scores = reliability["on_time_percent"].dropna()
-        if not valid_scores.empty:
-            overall_on_time = round(float(valid_scores.mean()), 1)
+    # Reliability is loaded later in the dedicated Reliability section.
+    # Keeping it out of the initial render prevents the dashboard from
+    # blocking at the top of the page.
+    reliability_conn = None
+    reliability_observations = None
+    reliability = None
 
     c1, c2, c3, c4, c5 = st.columns(5)
 
@@ -528,7 +514,7 @@ try:
     with c4:
         st.metric(
             label="Network On-Time",
-            value=f"{overall_on_time:.1f}%" if overall_on_time is not None else "?",
+            value="?",
         )
 
     with c5:
@@ -588,6 +574,21 @@ try:
         "03 / RELIABILITY",
         "Line, Station & Time Performance",
         "The core reliability view: route performance first, then delay concentration and time patterns.",
+    )
+
+    # Load reliability only when the Reliability section is reached.
+    reliability_conn = get_connection()
+
+    from src.analytics.reliability import get_reliability_observations
+
+    reliability_observations = get_reliability_observations(
+        reliability_conn,
+        limit=10,
+    )
+
+    reliability = get_line_reliability(
+        reliability_conn,
+        observations=reliability_observations,
     )
 
     # Line reliability is the primary view.
